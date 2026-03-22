@@ -435,6 +435,642 @@
     <datalist id="stockList">
         <!-- Will be populated by JS from CACHE.stock -->
     </datalist>
+<script>
+/* ============================
+   HOTFIX LOGIN (Rev3) – เข้าได้ทันที + กันหน้าเว็บค้าง
+   - ไม่พึ่ง syncAllData / fetch (กัน CORS ตอนเปิด file://)
+   - override doLogin/doLogout
+   - โชว์เมนูตามสิทธิ์ role-xxx
+   ============================ */
 
+(function () {
+  // 1) ซ่อน overlay ที่ค้างทับหน้า (ไฟล์คุณมี loaderOverlay/loginOverlay) [1](https://developers.google.com/apps-script/reference/spreadsheet/spreadsheet-app)
+  function hideOverlays() {
+    const loader = document.getElementById('loaderOverlay');
+    const login  = document.getElementById('loginOverlay');
+    if (loader) loader.classList.add('hidden');
+    // loginOverlay จะซ่อนเมื่อ login สำเร็จ
+  }
+
+  // 2) ผู้ใช้ทดสอบ (เข้าได้ทันที)
+  const DEMO_USERS = [
+    { user:'admin',   pass:'123', name:'Admin',         role:'admin'   },
+    { user:'factory', pass:'123', name:'Admin Factory', role:'factory' },
+    { user:'manager', pass:'123', name:'Manager',       role:'manager' },
+    { user:'site',    pass:'123', name:'Project Site',  role:'site'    },
+    { user:'user',    pass:'123', name:'User',          role:'user'    }
+  ];
+
+  // 3) โชว์/ซ่อนเมนูตามสิทธิ์ (ไฟล์คุณใช้ role-admin/role-factory/... ซ่อนอยู่แล้ว) [1](https://developers.google.com/apps-script/reference/spreadsheet/spreadsheet-app)
+  function hideAllRoleButtons() {
+    ['admin','factory','manager','site','user'].forEach(r => {
+      document.querySelectorAll('.role-' + r).forEach(el => el.style.display = 'none');
+    });
+  }
+  function showRoleButtons(role) {
+    hideAllRoleButtons();
+    document.querySelectorAll('.role-' + role).forEach(el => el.style.display = 'inline-flex');
+  }
+
+  // 4) อัปเดต UI แสดงชื่อ/role/ตัวอักษร
+  function setUserUI(u) {
+    const nameEl = document.getElementById('userNameDisplay');
+    const roleEl = document.getElementById('userRoleDisplay');
+    const initEl = document.getElementById('userInitial');
+    if (nameEl) nameEl.textContent = u.name || u.user;
+    if (roleEl) roleEl.textContent = (u.role || 'guest').toUpperCase();
+    if (initEl) initEl.textContent = (u.name || u.user || 'U').trim().charAt(0).toUpperCase();
+    showRoleButtons(u.role);
+  }
+
+  // 5) เก็บ session ใน localStorage
+  const KEY = '__KOSITD8_ACTIVE_USER';
+
+  // 6) ✅ override doLogin (ปุ่มในไฟล์เรียก doLogin() อยู่แล้ว) [1](https://developers.google.com/apps-script/reference/spreadsheet/spreadsheet-app)
+  window.doLogin = function () {
+    hideOverlays();
+
+    const username = (document.getElementById('loginUsername')?.value || '').trim();
+    const password = (document.getElementById('loginPassword')?.value || '').trim();
+
+    const found = DEMO_USERS.find(x => x.user === username && x.pass === password);
+    if (!found) {
+      alert('ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง (ลอง admin/123)');
+      return;
+    }
+
+    localStorage.setItem(KEY, JSON.stringify(found));
+    const loginOverlay = document.getElementById('loginOverlay');
+    if (loginOverlay) loginOverlay.style.display = 'none';
+
+    setUserUI(found);
+  };
+
+  // 7) ✅ override doLogout
+  window.doLogout = function () {
+    localStorage.removeItem(KEY);
+    location.reload();
+  };
+
+  // 8) กันเว็บ “ค้าง” เพราะ sync/fetch ตอนเปิดแบบ file://
+  // ถ้าไฟล์เดิมมีฟังก์ชัน syncAllData และมันถูกเรียกตอนโหลดหน้า ให้เราทับเป็น no-op เมื่อเป็น file://
+  const oldSyncAllData = window.syncAllData;
+  window.syncAllData = async function () {
+    if (location.protocol === 'file:') {
+      console.warn('Skip syncAllData on file:// (CORS/origin null).');
+      return;
+    }
+    if (typeof oldSyncAllData === 'function') {
+      try { return await oldSyncAllData(); } catch (e) {
+        console.warn('syncAllData failed but page continues:', e);
+        return;
+      }
+    }
+  };
+
+  // 9) ตอนโหลดหน้า: ถ้ามี user เดิมค้างไว้ให้ auto-login
+  document.addEventListener('DOMContentLoaded', () => {
+    hideOverlays();
+
+    const saved = localStorage.getItem(KEY);
+    if (saved) {
+      try {
+        const u = JSON.parse(saved);
+        const loginOverlay = document.getElementById('loginOverlay');
+        if (loginOverlay) loginOverlay.style.display = 'none';
+        setUserUI(u);
+        return;
+      } catch (e) {}
+    }
+
+    // ยังไม่ล็อกอิน: ซ่อนปุ่ม role ทั้งหมดก่อน
+    hideAllRoleButtons();
+
+    // แสดงหน้า login ไว้ (ไฟล์คุณมี loginOverlay อยู่แล้ว) [1](https://developers.google.com/apps-script/reference/spreadsheet/spreadsheet-app)
+    const loginOverlay = document.getElementById('loginOverlay');
+    if (loginOverlay) loginOverlay.style.display = 'flex';
+  });
+})();
+</script>
+<script>
+/* ===== Fallback menu handlers (fix: openHistory/openManagerPlan/openStock/openSummary undefined) ===== */
+(function(){
+  // helper modal (ใช้ของเดิมถ้ามี)
+  function _openSimple(title, html){
+    if (typeof openModal === 'function'){
+      try { openModal(title, html, 'bg-slate-800'); return; } catch(e){}
+    }
+    let ov = document.getElementById('__fallbackModal');
+    if(!ov){
+      ov = document.createElement('div');
+      ov.id='__fallbackModal';
+      ov.className='fixed inset-0 bg-black/70 z-[99999] flex items-center justify-center p-4';
+      ov.innerHTML = `
+        <div class="bg-white w-full max-w-3xl rounded-xl shadow-xl overflow-hidden">
+          <div class="bg-slate-800 text-white p-3 flex justify-between items-center">
+            <div class="font-bold" id="__fallbackTitle"></div>
+            <button class="text-2xl leading-none" onclick="document.getElementById('__fallbackModal').remove()">&times;</button>
+          </div>
+          <div class="p-4" id="__fallbackBody"></div>
+        </div>`;
+      document.body.appendChild(ov);
+    }
+    ov.querySelector('#__fallbackTitle').textContent = title;
+    ov.querySelector('#__fallbackBody').innerHTML = html;
+  }
+
+  // 1) ประวัติ/ติดตาม
+  if (typeof window.openHistory !== 'function'){
+    window.openHistory = function(){
+      _openSimple('📂 ประวัติ/ติดตาม', `
+        <div class="text-sm text-gray-700">
+          ฟังก์ชัน <b>openHistory()</b> ยังไม่มีในไฟล์นี้/สคริปต์ไม่ถูกโหลด จึงทำให้ปุ่มเด้ง error.<br>
+          <br>✅ วิธีถาวร: ใช้ไฟล์ตัวเต็ม <b>index.pr form rev3.html</b> จากแหล่งเดิม แล้วค่อยนำแพตช์ไปวางท้ายไฟล์
+        </div>
+      `);
+    }
+  }
+
+  // 2) แผนงานผู้อนุมัติ
+  if (typeof window.openManagerPlan !== 'function'){
+    window.openManagerPlan = function(){
+      _openSimple('📅 แผนงานผู้อนุมัติ (Manager)', `
+        <div class="text-sm text-gray-700">
+          ฟังก์ชัน <b>openManagerPlan()</b> ยังไม่มีในไฟล์นี้/สคริปต์ไม่ถูกโหลด<br>
+          ถ้าคุณต้องการให้หน้านี้ทำงานจริง (ดึงรายการรออนุมัติ) ต้องมีโค้ดส่วน Manager Dashboard ครบในไฟล์หลัก
+        </div>
+      `);
+    }
+  }
+
+  // 3) จัดการสต๊อก
+  if (typeof window.openStock !== 'function'){
+    window.openStock = function(){
+      _openSimple('📦 จัดการสต๊อก', `
+        <div class="text-sm text-gray-700">
+          ฟังก์ชัน <b>openStock()</b> ยังไม่มีในไฟล์นี้/สคริปต์ไม่ถูกโหลด<br>
+          ต้องใช้ไฟล์ที่มีโมดูลจัดการสต๊อกครบ หรือย้ายโค้ดส่วน stock มาจากเวอร์ชันอื่น
+        </div>
+      `);
+    }
+  }
+
+  // 4) สรุปต้นทุน
+  if (typeof window.openSummary !== 'function'){
+    window.openSummary = function(){
+      _openSimple('📊 สรุปต้นทุน', `
+        <div class="text-sm text-gray-700">
+          ฟังก์ชัน <b>openSummary()</b> ยังไม่มีในไฟล์นี้/สคริปต์ไม่ถูกโหลด<br>
+          ต้องใช้ไฟล์ที่มีโมดูลสรุปต้นทุนครบ หรือย้ายโค้ดส่วน summary มาจากเวอร์ชันอื่น
+        </div>
+      `);
+    }
+  }
+})();
+</script>
+<script>
+/* ============================
+   MENU FIX PACK (Offline)
+   - Defines: openHistory(), openManagerPlan(), openStock(), openSummary()
+   - Uses localStorage (auto-detect keys) so it works even if DB.* is missing
+   ============================ */
+
+(function(){
+
+  /* ---------- Helpers ---------- */
+  const $ = (id)=>document.getElementById(id);
+  const esc = (s)=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+  const j = (v)=>{ try{return JSON.parse(v)}catch(e){return null} };
+
+  function findArrayKey(matchOne){
+    for(let i=0;i<localStorage.length;i++){
+      const k = localStorage.key(i);
+      const v = j(localStorage.getItem(k));
+      if(Array.isArray(v)){
+        if(v.length===0) continue;
+        if(matchOne(v[0], v)) return k;
+      }
+    }
+    return null;
+  }
+
+  function getRecordsStore(){
+    if(window.DB && Array.isArray(DB.records)){
+      return { arr: DB.records, save: ()=>{ try{ if(typeof saveLocal==='function') saveLocal(); }catch(e){} } };
+    }
+    const key = findArrayKey(one => one && (one.items || one.Items) && (one.docNo || one.doc_no || one.type || one.status));
+    const arr = key ? (j(localStorage.getItem(key))||[]) : [];
+    return { arr, save: ()=> key && localStorage.setItem(key, JSON.stringify(arr)) };
+  }
+
+  function getStockStore(){
+    if(window.DB && Array.isArray(DB.stock)){
+      return { arr: DB.stock, save: ()=>{ try{ if(typeof saveLocal==='function') saveLocal(); }catch(e){} } };
+    }
+    const key = findArrayKey(one => one && (one.name || one.item_name) && (one.cost!=null || one.price!=null));
+    const arr = key ? (j(localStorage.getItem(key))||[]) : [];
+    return { arr, save: ()=> key && localStorage.setItem(key, JSON.stringify(arr)) };
+  }
+
+  function stockPriceByName(name){
+    const {arr} = getStockStore();
+    const n = String(name||'').trim();
+    const x = arr.find(s => String(s.name||s.item_name||'').trim()===n);
+    return x ? Number(x.cost ?? x.price ?? x.unitPrice ?? 0) : 0;
+  }
+
+  function normStatus(s){ return String(s||'').toLowerCase(); }
+  function getDocNo(d){ return d.docNo || d.doc_no || d.DocNo || d.no || d.documentNo || ''; }
+  function getProj(d){ return d.proj || d.project || d.Project || ''; }
+  function getType(d){ return d.type || d.docType || d.Type || ''; }
+  function getDate(d){ return d.date || d.docDate || d.Date || ''; }
+  function getItems(d){
+    const it = d.items || d.Items || [];
+    return Array.isArray(it) ? it : [];
+  }
+
+  function ensureItem(it){
+    if(it.stockYN==null && it.stock!=null) it.stockYN = it.stock;
+    if(it.priceFinal==null) it.priceFinal = it.pricePO ?? it.poPrice ?? it.price ?? '';
+    if(it.deliveredQty==null) it.deliveredQty = Number(it.delivered ?? it.del ?? 0);
+  }
+
+  function allYNFilled(items){
+    return items.every(it => ['Y','N'].includes(String(it.stockYN||'').toUpperCase()));
+  }
+
+  /* ---------- Simple Modal ---------- */
+  function openBox(title, html){
+    // ใช้ openModal เดิมถ้ามี
+    if(typeof openModal === 'function'){
+      try { openModal(title, html, 'bg-slate-800'); return; } catch(e){}
+    }
+    // fallback modal
+    let ov = document.getElementById('__menuFixModal');
+    if(!ov){
+      ov = document.createElement('div');
+      ov.id='__menuFixModal';
+      ov.className='fixed inset-0 bg-black/70 z-[99999] flex items-center justify-center p-4';
+      ov.innerHTML = `
+        <div class="bg-white w-full max-w-6xl max-h-[90vh] rounded-xl shadow-xl flex flex-col overflow-hidden">
+          <div class="p-3 bg-slate-800 text-white flex justify-between items-center">
+            <div class="font-bold" id="__mfTitle"></div>
+            <button class="text-2xl leading-none" onclick="document.getElementById('__menuFixModal').remove()">&times;</button>
+          </div>
+          <div class="p-4 overflow-auto" id="__mfBody"></div>
+        </div>`;
+      document.body.appendChild(ov);
+    }
+    ov.querySelector('#__mfTitle').textContent = title;
+    ov.querySelector('#__mfBody').innerHTML = html;
+  }
+
+  /* ======================================================
+     1) openStock(): จัดการสต๊อกแบบง่าย (เพิ่ม/ลบ/แก้)
+     ====================================================== */
+  window.openStock = function(){
+    const store = getStockStore();
+    const render = ()=>{
+      const rows = store.arr.map((s,idx)=>`
+        <tr>
+          <td class="border p-2">${esc(s.code||s.sku||'')}</td>
+          <td class="border p-2 font-bold">${esc(s.name||s.item_name||'')}</td>
+          <td class="border p-2 text-center">${esc(s.unit||'')}</td>
+          <td class="border p-2 text-right">${Number(s.cost ?? s.price ?? 0).toLocaleString()}</td>
+          <td class="border p-2">${esc(s.supplier||'')}</td>
+          <td class="border p-2 text-center">
+            <button class="px-2 py-1 bg-slate-700 text-white rounded text-xs"
+              onclick="__stockEdit(${idx})">แก้</button>
+            <button class="px-2 py-1 bg-red-600 text-white rounded text-xs ml-1"
+              onclick="__stockDel(${idx})">ลบ</button>
+          </td>
+        </tr>`).join('');
+
+      openBox('📦 จัดการสต๊อก', `
+        <div class="grid md:grid-cols-5 gap-2 mb-3">
+          <input id="__st_code" class="border p-2 rounded" placeholder="รหัส/Code">
+          <input id="__st_name" class="border p-2 rounded md:col-span-2" placeholder="ชื่อรายการ/Name">
+          <input id="__st_unit" class="border p-2 rounded" placeholder="หน่วย/Unit">
+          <input id="__st_cost" type="number" class="border p-2 rounded" placeholder="ต้นทุน/Cost">
+          <input id="__st_supplier" class="border p-2 rounded md:col-span-2" placeholder="Supplier">
+          <div class="md:col-span-3 flex gap-2">
+            <button class="px-3 py-2 bg-green-600 text-white rounded font-bold"
+              onclick="__stockSave()">บันทึก/เพิ่ม</button>
+            <button class="px-3 py-2 bg-gray-200 rounded font-bold"
+              onclick="__stockClear()">ล้างฟอร์ม</button>
+          </div>
+          <input id="__st_editIndex" type="hidden" value="">
+        </div>
+
+        <div class="overflow-auto">
+          <table class="w-full text-sm border">
+            <thead class="bg-amber-50">
+              <tr>
+                <th class="border p-2">รหัส</th>
+                <th class="border p-2">ชื่อรายการ</th>
+                <th class="border p-2 w-24">หน่วย</th>
+                <th class="border p-2 w-32">ต้นทุน</th>
+                <th class="border p-2">Supplier</th>
+                <th class="border p-2 w-28">จัดการ</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows || `<tr><td colspan="6" class="border p-3 text-center text-gray-500">ยังไม่มีข้อมูลสต๊อก (เก็บใน localStorage)</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      `);
+    };
+
+    // expose actions
+    window.__stockClear = ()=>{
+      ['__st_code','__st_name','__st_unit','__st_cost','__st_supplier','__st_editIndex'].forEach(id=>{
+        const el=$(id); if(el) el.value='';
+      });
+    };
+    window.__stockEdit = (idx)=>{
+      const s = store.arr[idx]; if(!s) return;
+      $('__st_code').value = s.code||s.sku||'';
+      $('__st_name').value = s.name||s.item_name||'';
+      $('__st_unit').value = s.unit||'';
+      $('__st_cost').value = Number(s.cost ?? s.price ?? 0) || '';
+      $('__st_supplier').value = s.supplier||'';
+      $('__st_editIndex').value = String(idx);
+    };
+    window.__stockDel = (idx)=>{
+      store.arr.splice(idx,1);
+      store.save();
+      render();
+    };
+    window.__stockSave = ()=>{
+      const obj = {
+        code: $('__st_code').value.trim(),
+        name: $('__st_name').value.trim(),
+        unit: $('__st_unit').value.trim(),
+        cost: Number($('__st_cost').value||0),
+        supplier: $('__st_supplier').value.trim()
+      };
+      if(!obj.name) return alert('กรุณาใส่ชื่อรายการ');
+      const ei = $('__st_editIndex').value;
+      if(ei!==''){
+        store.arr[Number(ei)] = obj;
+      }else{
+        store.arr.push(obj);
+      }
+      store.save();
+      window.__stockClear();
+      render();
+    };
+
+    render();
+  };
+
+  /* ======================================================
+     2) openHistory(): ประวัติแบบง่าย (ดูรายการทั้งหมด)
+     ====================================================== */
+  window.openHistory = function(){
+    const store = getRecordsStore();
+    const rows = store.arr.slice().reverse().map(d=>{
+      const st = d.status || d.Status || '';
+      return `
+        <tr>
+          <td class="border p-2 font-bold text-red-600">${esc(getDocNo(d) || d.id || '')}</td>
+          <td class="border p-2">${esc(getProj(d))}</td>
+          <td class="border p-2">${esc(getType(d))}</td>
+          <td class="border p-2">${esc(getDate(d))}</td>
+          <td class="border p-2">${esc(st)}</td>
+          <td class="border p-2 text-center">
+            <button class="px-2 py-1 bg-slate-800 text-white rounded text-xs"
+              onclick="__histDetail('${String(d.id||getDocNo(d)||'').replace(/'/g,\"\\\\'\")}')">ดู</button>
+          </td>
+        </tr>`;
+    }).join('');
+
+    window.__histDetail = (id)=>{
+      const doc = store.arr.find(x => String(x.id||getDocNo(x)||'')===String(id));
+      if(!doc) return alert('ไม่พบเอกสาร');
+      const items = getItems(doc); items.forEach(ensureItem);
+      const itRows = items.map((it,idx)=>`
+        <tr>
+          <td class="border p-2 text-center">${idx+1}</td>
+          <td class="border p-2 font-bold">${esc(it.name||it.item||it.desc||'')}</td>
+          <td class="border p-2 text-center">${esc(it.qty??it.quantity??'')} ${esc(it.unit||'')}</td>
+          <td class="border p-2 text-center">${esc(String(it.stockYN||'').toUpperCase()||'-')}</td>
+          <td class="border p-2 text-right">${Number(it.priceFinal||it.price||0).toLocaleString()}</td>
+        </tr>`).join('');
+
+      openBox('📄 รายละเอียดเอกสาร', `
+        <div class="text-sm mb-3">
+          <div><b>เลขที่:</b> ${esc(getDocNo(doc))}</div>
+          <div><b>โครงการ:</b> ${esc(getProj(doc))}</div>
+          <div><b>ประเภท:</b> ${esc(getType(doc))}</div>
+          <div><b>สถานะ:</b> ${esc(doc.status||doc.Status||'')}</div>
+        </div>
+        <div class="overflow-auto">
+          <table class="w-full text-sm border">
+            <thead class="bg-slate-100">
+              <tr>
+                <th class="border p-2 w-12">#</th>
+                <th class="border p-2">รายการ</th>
+                <th class="border p-2 w-32">จำนวน</th>
+                <th class="border p-2 w-20">Y/N</th>
+                <th class="border p-2 w-28">ราคา</th>
+              </tr>
+            </thead>
+            <tbody>${itRows || `<tr><td colspan="5" class="border p-3 text-center text-gray-500">ไม่มีรายการ</td></tr>`}</tbody>
+          </table>
+        </div>
+      `);
+    };
+
+    openBox('📂 ประวัติ/ติดตาม', `
+      <div class="overflow-auto">
+        <table class="w-full text-sm border">
+          <thead class="bg-slate-100">
+            <tr>
+              <th class="border p-2">เลขที่</th>
+              <th class="border p-2">โครงการ</th>
+              <th class="border p-2">ประเภท</th>
+              <th class="border p-2">วันที่</th>
+              <th class="border p-2">สถานะ</th>
+              <th class="border p-2 w-20">ดู</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows || `<tr><td colspan="6" class="border p-3 text-center text-gray-500">ยังไม่มีประวัติ</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `);
+  };
+
+  /* ======================================================
+     3) openManagerPlan(): รายการรออนุมัติ + แสดง Y/N + อนุมัติ -> approved
+     ====================================================== */
+  window.openManagerPlan = function(){
+    const store = getRecordsStore();
+    const pending = store.arr.filter(d => ['manager_review','submitted_to_manager','submitted'].includes(normStatus(d.status||d.Status)));
+
+    function approveById(id){
+      const doc = store.arr.find(x => String(x.id||getDocNo(x)||'')===String(id));
+      if(!doc) return alert('ไม่พบเอกสาร');
+      const items = getItems(doc); items.forEach(ensureItem);
+      if(!allYNFilled(items)) return alert('ยังเช็ค Stock Y/N ไม่ครบทุกบรรทัด');
+      doc.status = 'approved';
+      doc.Status = 'approved';
+      store.save();
+      openManagerPlan();
+    }
+
+    window.__mgrApprove = approveById;
+    window.__mgrView = (id)=>{
+      const doc = store.arr.find(x => String(x.id||getDocNo(x)||'')===String(id));
+      if(!doc) return alert('ไม่พบเอกสาร');
+      const items = getItems(doc); items.forEach(ensureItem);
+      const rows = items.map((it,idx)=>`
+        <tr>
+          <td class="border p-2 text-center">${idx+1}</td>
+          <td class="border p-2 font-bold">${esc(it.name||it.item||it.desc||'')}</td>
+          <td class="border p-2 text-center">${esc(it.qty??it.quantity??'')} ${esc(it.unit||'')}</td>
+          <td class="border p-2 text-center font-bold">${esc(String(it.stockYN||'').toUpperCase()||'-')}</td>
+          <td class="border p-2">${esc(it.note||'')}</td>
+        </tr>`).join('');
+      openBox('✅ รายละเอียดเพื่ออนุมัติ', `
+        <div class="text-sm mb-2">
+          <b>เลขที่:</b> ${esc(getDocNo(doc) || doc.id || '')} &nbsp; <b>โครงการ:</b> ${esc(getProj(doc))}
+        </div>
+        <div class="overflow-auto">
+          <table class="w-full text-sm border">
+            <thead class="bg-indigo-100">
+              <tr>
+                <th class="border p-2 w-12">#</th>
+                <th class="border p-2">รายการ</th>
+                <th class="border p-2 w-32">จำนวน</th>
+                <th class="border p-2 w-24">Stock Y/N</th>
+                <th class="border p-2">หมายเหตุ</th>
+              </tr>
+            </thead>
+            <tbody>${rows || `<tr><td colspan="5" class="border p-3 text-center text-gray-500">ไม่มีรายการ</td></tr>`}</tbody>
+          </table>
+        </div>
+      `);
+    };
+
+    const rows = pending.map(d=>{
+      const id = d.id || getDocNo(d) || '';
+      const items = getItems(d); items.forEach(ensureItem);
+      const ynOk = allYNFilled(items);
+      return `
+        <tr>
+          <td class="border p-2 font-bold text-red-600">${esc(getDocNo(d) || String(id))}</td>
+          <td class="border p-2">${esc(getProj(d))}</td>
+          <td class="border p-2">${esc(getType(d))}</td>
+          <td class="border p-2 text-center">${ynOk ? '<span class="text-green-700 font-bold">ครบ</span>' : '<span class="text-amber-700 font-bold">ยังไม่ครบ</span>'}</td>
+          <td class="border p-2 text-center">
+            <button class="px-2 py-1 bg-slate-800 text-white rounded text-xs"
+              onclick="__mgrView('${String(id).replace(/'/g,\"\\\\'\")}')">ดู</button>
+            <button class="px-2 py-1 bg-green-600 text-white rounded text-xs ml-1"
+              onclick="__mgrApprove('${String(id).replace(/'/g,\"\\\\'\")}')">อนุมัติ</button>
+          </td>
+        </tr>`;
+    }).join('');
+
+    openBox('📅 แผนงานผู้อนุมัติ (Manager)', `
+      <div class="text-sm text-gray-600 mb-2">
+        * อนุมัติได้เมื่อ Factory เช็ค Stock Y/N ครบทุกบรรทัด (จากข้อมูลในรายการ)
+      </div>
+      <div class="overflow-auto">
+        <table class="w-full text-sm border">
+          <thead class="bg-indigo-100">
+            <tr>
+              <th class="border p-2">เลขที่</th>
+              <th class="border p-2">โครงการ</th>
+              <th class="border p-2">ประเภท</th>
+              <th class="border p-2 w-24 text-center">Stock Y/N</th>
+              <th class="border p-2 w-32 text-center">จัดการ</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows || `<tr><td colspan="5" class="border p-3 text-center text-gray-500">ไม่มีรายการรออนุมัติ</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `);
+  };
+
+  /* ======================================================
+     4) openSummary(): สรุปต้นทุนแบบง่าย (Approved/Delivered)
+     ====================================================== */
+  window.openSummary = function(){
+    const store = getRecordsStore();
+    const docs = store.arr.filter(d => ['approved','delivered'].includes(normStatus(d.status||d.Status)));
+
+    // รวมยอดตามโครงการ
+    const map = new Map();
+    docs.forEach(d=>{
+      const proj = getProj(d) || '(ไม่ระบุโครงการ)';
+      const type = getType(d) || '';
+      const key = proj;
+      if(!map.has(key)){
+        map.set(key, { proj, material:0, vehicle:0, labor:0, total:0 });
+      }
+      const bucket = map.get(key);
+
+      const items = getItems(d); items.forEach(ensureItem);
+      let sumDoc = 0;
+      items.forEach(it=>{
+        const qty = Number(it.qty ?? it.quantity ?? 0);
+        const yn = String(it.stockYN||'').toUpperCase();
+        let price = Number(it.priceFinal || it.price || 0);
+        if(!price && yn==='Y'){
+          price = stockPriceByName(it.name||it.item||it.desc);
+        }
+        sumDoc += qty * (price||0);
+      });
+
+      const t = String(type);
+      if(t.includes('วัสดุ')) bucket.material += sumDoc;
+      else if(t.includes('รถ')) bucket.vehicle += sumDoc;
+      else if(t.includes('คนงาน')) bucket.labor += sumDoc;
+      else bucket.material += sumDoc; // default
+
+      bucket.total += sumDoc;
+    });
+
+    const rows = Array.from(map.values()).map(x=>`
+      <tr>
+        <td class="border p-2 font-bold">${esc(x.proj)}</td>
+        <td class="border p-2 text-right">${x.material.toLocaleString()}</td>
+        <td class="border p-2 text-right">${x.vehicle.toLocaleString()}</td>
+        <td class="border p-2 text-right">${x.labor.toLocaleString()}</td>
+        <td class="border p-2 text-right font-bold">${x.total.toLocaleString()}</td>
+      </tr>`).join('');
+
+    openBox('📊 สรุปต้นทุน (Approved/Delivered)', `
+      <div class="text-sm text-gray-600 mb-2">
+        * คิดจากเอกสารสถานะ <b>approved</b> หรือ <b>delivered</b><br>
+        * ราคาใช้ <b>priceFinal</b> ถ้ามี / ถ้า Stock=Y และไม่มีราคา จะดึงจากสต๊อกตามชื่อรายการ
+      </div>
+      <div class="overflow-auto">
+        <table class="w-full text-sm border">
+          <thead class="bg-green-100">
+            <tr>
+              <th class="border p-2">โครงการ</th>
+              <th class="border p-2 w-32 text-right">ค่าวัสดุ</th>
+              <th class="border p-2 w-32 text-right">ค่ารถ</th>
+              <th class="border p-2 w-32 text-right">ค่าแรง</th>
+              <th class="border p-2 w-32 text-right">รวม</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows || `<tr><td colspan="5" class="border p-3 text-center text-gray-500">ยังไม่มีเอกสาร approved/delivered</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `);
+  };
+
+})();
+</script>
 </body>
 </html>
